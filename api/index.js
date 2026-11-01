@@ -164,11 +164,16 @@ function serverAuthHeader() {
 
 function resultRedirect(res, params, cookieClear) {
   const base = env("REDIRECT_URL");
-  const headers = { "Set-Cookie": cookieClear };
-  if (!base) return null;
-  const url = new URL(base);
+  if (!base) return false;
+  let url;
+  try {
+    url = new URL(base);
+  } catch (e) {
+    return false;
+  }
   Object.keys(params).forEach((k) => url.searchParams.set(k, String(params[k])));
-  return redirect(res, url.toString(), headers);
+  redirect(res, url.toString(), { "Set-Cookie": cookieClear });
+  return true;
 }
 
 async function handleLogin(req, res) {
@@ -228,9 +233,9 @@ async function handleCallback(req, res, url) {
       results.push({ target, status: "self" });
       continue;
     }
-    const followRes = await gh(`/user/following/${encodeURIComponent(target)}`, {
+      const followRes = await gh(`/user/following/${encodeURIComponent(target)}`, {
       method: "PUT",
-      headers: { ...auth, "Content-Length": "0" }
+      headers: auth
     });
     results.push({ target, status: followRes.status === 204 ? "followed" : "failed" });
   }
@@ -335,7 +340,8 @@ module.exports = async (req, res) => {
     if (path === "/check") return await handleCheck(req, res, url);
     if (path === "/stats") return await handleStats(req, res);
     return sendJson(res, 404, { ok: false, error: "not_found" });
-  } catch (e) {
+    } catch (e) {
+    console.error("internal_error:", e && e.message, e && e.cause && e.cause.message);
     return sendJson(res, 500, { ok: false, error: "internal_error" });
   }
 };
