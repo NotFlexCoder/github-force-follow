@@ -11,7 +11,7 @@ const buckets = new Map();
 
 function env(name, fallback = "") {
   const value = process.env[name];
-  return value === undefined || value === "" ? fallback : value;
+  return value === undefined || value === "" ? fallback : value.trim();
 }
 
 function targets() {
@@ -88,7 +88,11 @@ function parseCookies(req) {
   header.split(";").forEach((pair) => {
     const idx = pair.indexOf("=");
     if (idx < 0) return;
-    out[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
+    try {
+      out[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
+    } catch (e) {
+      return;
+    }
   });
   return out;
 }
@@ -162,6 +166,11 @@ function serverAuthHeader() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+function basicAuthHeader() {
+  const raw = `${env("GITHUB_CLIENT_ID")}:${env("GITHUB_CLIENT_SECRET")}`;
+  return `Basic ${Buffer.from(raw).toString("base64")}`;
+}
+
 function resultRedirect(res, params, cookieClear) {
   const base = env("REDIRECT_URL");
   if (!base) return false;
@@ -199,6 +208,7 @@ async function handleCallback(req, res, url) {
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   const nonce = parseCookies(req).ff_nonce;
+
   const fail = (status, error) => {
     if (resultRedirect(res, { status: "error", error }, clearCookie)) return;
     res.setHeader("Set-Cookie", clearCookie);
@@ -209,7 +219,11 @@ async function handleCallback(req, res, url) {
 
   const tokenRes = await fetch(`${GH_OAUTH}/access_token`, {
     method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "force-follow-api" },
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": "force-follow-api"
+    },
     body: JSON.stringify({
       client_id: env("GITHUB_CLIENT_ID"),
       client_secret: env("GITHUB_CLIENT_SECRET"),
@@ -233,25 +247,32 @@ async function handleCallback(req, res, url) {
       results.push({ target, status: "self" });
       continue;
     }
-      const followRes = await gh(`/user/following/${encodeURIComponent(target)}`, {
+    const existing = await gh(`/user/following/${encodeURIComponent(target)}`, { headers: auth });
+    if (existing.status === 204) {
+      results.push({ target, status: "already_following" });
+      continue;
+    }
+    const followRes = await gh(`/user/following/${encodeURIComponent(target)}`, {
       method: "PUT",
       headers: auth
     });
     results.push({ target, status: followRes.status === 204 ? "followed" : "failed" });
   }
 
-  await fetch(`${GH_API}/applications/${encodeURIComponent(env("GITHUB_CLIENT_ID"))}/token`, {
+  await fetch(`${GH_API}/applications/${encodeURIComponent(env("GITHUB_CLIENT_ID"))}/grant`, {
     method: "DELETE",
     headers: {
       Accept: "application/vnd.github+json",
       "User-Agent": "force-follow-api",
-      Authorization: `Basic ${Buffer.from(`${env("GITHUB_CLIENT_ID")}:${env("GITHUB_CLIENT_SECRET")}`).toString("base64")}`,
+      Authorization: basicAuthHeader(),
       "Content-Type": "application/json"
     },
     body: JSON.stringify({ access_token: accessToken })
   }).catch(() => null);
 
-  const allOk = results.every((r) => r.status === "followed" || r.status === "self");
+  const allOk = results.every(
+    (r) => r.status === "followed" || r.status === "self" || r.status === "already_following"
+  );
   if (resultRedirect(res, { status: allOk ? "success" : "partial", user: me.login }, clearCookie)) return;
   res.setHeader("Set-Cookie", clearCookie);
   return sendJson(res, 200, { ok: allOk, user: me.login, results });
@@ -288,7 +309,13 @@ async function handleStats(req, res) {
       const r = await gh(`/users/${encodeURIComponent(target)}`, { headers: serverAuthHeader() });
       if (!r.ok) return { target, error: "lookup_failed" };
       const d = await r.json();
-      return { target, followers: d.followers, following: d.following, publicRepos: d.public_repos, avatar: d.avatar_url };
+      return {
+        target,
+        followers: d.followers,
+        following: d.following,
+        publicRepos: d.public_repos,
+        avatar: d.avatar_url
+      };
     })
   );
   return sendJson(res, 200, { ok: true, stats });
@@ -299,7 +326,13 @@ function handleHealth(res) {
     ok: true,
     service: "github-force-follow-api",
     time: new Date().toISOString(),
-    configured: Boolean(env("GITHUB_CLIENT_ID") && env("GITHUB_CLIENT_SECRET") && env("STATE_SECRET") && env("BASE_URL") && targets().length)
+    configured: Boolean(
+      env("GITHUB_CLIENT_ID") &&
+        env("GITHUB_CLIENT_SECRET") &&
+        env("STATE_SECRET") &&
+        env("BASE_URL") &&
+        targets().length
+    )
   });
 }
 
@@ -340,8 +373,8 @@ module.exports = async (req, res) => {
     if (path === "/check") return await handleCheck(req, res, url);
     if (path === "/stats") return await handleStats(req, res);
     return sendJson(res, 404, { ok: false, error: "not_found" });
-    } catch (e) {
+  } catch (e) {
     console.error("internal_error:", e && e.message, e && e.cause && e.cause.message);
-    return sendJson(res, 500, { ok: false, error: "internal_error" });
+    if (!res.headersSent) return sendJson(res, 500, { ok: false, error: "internal_error" });
   }
 };
