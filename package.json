@@ -1,0 +1,13 @@
+{
+  "name": "github-force-follow",
+  "version": "1.0.0",
+  "private": true,
+  "main": "api/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "license": "MIT"
+}
